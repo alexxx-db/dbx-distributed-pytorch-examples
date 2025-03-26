@@ -3,12 +3,16 @@
 
 # COMMAND ----------
 
+# MAGIC %sh nvidia-smi
+
+# COMMAND ----------
+
 import mlflow
 
 username = spark.sql("SELECT current_user()").first()['current_user()']
 username
 
-experiment_path = f'/Users/{username}/pytorch-distributor'
+experiment_path = f'/Users/{username}/deepspeed-distributor'
 
 # Retrieve workspace URL and API token using dbutils notebook commands
 db_host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
@@ -52,7 +56,7 @@ experiment = mlflow.set_experiment(experiment_path)
 
 import os
 
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/imagenet"
+HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/imagenet_tiny"
 os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
 
 # COMMAND ----------
@@ -60,14 +64,13 @@ os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
 # MAGIC %md
 # MAGIC ## Data Splits
 # MAGIC
-# MAGIC #### Total Rows: 1,431,167 (310.40 gb)
+# MAGIC #### Total Rows: 110,000 (0.35 gb)
 # MAGIC
 # MAGIC
 # MAGIC | Split       | # of examples |
 # MAGIC |-------------|---------------|
-# MAGIC | Train       | 1,281,167   |
-# MAGIC | Test        | 50,000 |
-# MAGIC | Validation  | 100,000       |
+# MAGIC | Train       | 100,000  |
+# MAGIC | Validation  | 10,000  |
 
 # COMMAND ----------
 
@@ -84,7 +87,7 @@ from datasets import load_dataset
 import datasets
 
 datasets.utils.logging.disable_progress_bar()
-image_net = load_dataset('ILSVRC/imagenet-1k', cache_dir=HF_DATASETS_CACHE, trust_remote_code=True)
+image_net = load_dataset('zh-plus/tiny-imagenet', cache_dir=HF_DATASETS_CACHE, trust_remote_code=True)
 
 # COMMAND ----------
 
@@ -137,7 +140,7 @@ class ResNet50(nn.Module):
         super(ResNet50, self).__init__()
         
         # Load the pre-trained ResNet-18 model from torchvision
-        self.resnet = models.resnet18(weights=ResNet50_Weights.DEFAULT)  # ResNet-18 architecture
+        self.resnet = models.resnet50(weights=ResNet50_Weights.DEFAULT)  # ResNet-18 architecture
 
         # Freeze the layers except the final fully connected layer
         for param in self.resnet.parameters():
@@ -233,7 +236,7 @@ def train(log_dir):
   # Create DataLoaders with batching and shuffling
   train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-  model = ResNet50().to(device)
+  model = ResNet50(num_class).to(device)
 
   # Hyperparameters
   learning_rate = 1e-5
@@ -260,7 +263,7 @@ def test(log_dir):
   loss_func = nn.CrossEntropyLoss()
 
   device = torch.device('cuda')
-  loaded_model = ResNet50().to(device)  
+  loaded_model = ResNet50(num_class).to(device)  
 
   checkpoint = load_checkpoint(log_dir)
   loaded_model.load_state_dict(checkpoint['model'])
@@ -599,16 +602,6 @@ cifar_dataset['test']['label'][test_index]
 # COMMAND ----------
 
 prediction
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC ## Reset cluster for this notebooks session
-
-# COMMAND ----------
-
-# MAGIC %restart_python
 
 # COMMAND ----------
 
