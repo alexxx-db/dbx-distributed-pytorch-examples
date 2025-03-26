@@ -1,10 +1,10 @@
 # Databricks notebook source
-# MAGIC %run ../setup/00_setup
+# MAGIC %pip install deepspeed
+# MAGIC %restart_python
 
 # COMMAND ----------
 
-# MAGIC %pip install deepspeed 
-# MAGIC %restart_python
+# %run ../setup/00_setup
 
 # COMMAND ----------
 
@@ -13,6 +13,7 @@
 # COMMAND ----------
 
 import mlflow
+import os
 
 username = spark.sql("SELECT current_user()").first()['current_user()']
 username
@@ -28,131 +29,62 @@ experiment = mlflow.set_experiment(experiment_path)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## TorchDistributor 
-# MAGIC
-# MAGIC - Prepare single node code: Prepare and test the single node code with PyTorch, PyTorch Lightning, or other frameworks that are based on PyTorch/PyTorch Lightning like, the HuggingFace Trainer API.
-# MAGIC
-# MAGIC - Prepare code for standard distributed training: You need to convert your single process training to distributed training. Have this distributed code all encompassed within one training function that you can use with the TorchDistributor.
-# MAGIC
-# MAGIC - Move imports within training function: Add the necessary imports, such as import torch, within the training function. Doing so allows you to avoid common pickling errors. Furthermore, the device_id that models and data are be tied to is determined by:
-# MAGIC
-# MAGIC - Launch distributed training: Instantiate the TorchDistributor with the desired parameters and call .run(*args) to launch training.
-# MAGIC
-# MAGIC
+dbutils.widgets.dropdown("distribution_mechanism", "Deepspeed_HF_Trainer", 
+                         ["accelerate", "TorchDistributor", "Deepspeed_HF_Trainer", "Deepspeed_Custom_Loop"])
+dbutils.widgets.text("num_gpus_per_node", "4")
+dbutils.widgets.text("num_nodes", "1")
+dbutils.widgets.dropdown("deepspeed_stage", "stage_3_offload", ["stage_1", "stage_2", "stage_3", "stage_3_offload"])
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC # Resnet definition 
+# Databricks configuration and MLflow setup
+browser_host = spark.conf.get("spark.databricks.workspaceUrl")
+db_host = f"https://{browser_host}"
+db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+
+# MLflow configuration
+username = spark.sql("SELECT current_user()").first()['current_user()']
+experiment_path = f'/Users/{username}/deepspeed-distributor'
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC # Preprocessing
+# execution option
+exec_opt = dbutils.widgets.get("distribution_mechanism")
+num_gpus = int(dbutils.widgets.get("num_gpus_per_node"))
+num_nodes = int(dbutils.widgets.get("num_nodes"))
+deepspeed_stage = dbutils.widgets.get("deepspeed_stage")
 
 # COMMAND ----------
 
-# MAGIC %md 
-# MAGIC
-# MAGIC The CIFAR-10 dataset consists of 60000 32x32 colour images in 10 classes, with 6000 images per class. There are 50000 training images and 10000 test images. The dataset is divided into five training batches and one test batch, each with 10000 images. The test batch contains exactly 1000 randomly-selected images from each class. The training batches contain the remaining images in random order, but some training batches may contain more images from one class than another. Between them, the training batches contain exactly 5000 images from each class.
-
-# COMMAND ----------
-
-import os
-
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/imagenet_tiny"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Data Splits
-# MAGIC
-# MAGIC #### Total Rows: 110,000 (0.35 gb)
-# MAGIC
-# MAGIC
-# MAGIC | Split       | # of examples |
-# MAGIC |-------------|---------------|
-# MAGIC | Train       | 100,000 |
-# MAGIC | Validation  | 10,000      |
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC ### Load dataset does not segment files to download based on split 
-# MAGIC https://discuss.huggingface.co/t/how-can-i-download-a-specific-split-of-a-dataset/79027
-# MAGIC
-
-# COMMAND ----------
-
-# DBTITLE 1,Load the dataset from cache to avoid redownloading
-from datasets import load_dataset
-import datasets
-
-datasets.utils.logging.disable_progress_bar()
-tiny_imagenet = load_dataset('zh-plus/tiny-imagenet', cache_dir=HF_DATASETS_CACHE, trust_remote_code=True)
-
-# COMMAND ----------
-
-tiny_imagenet
-
-# COMMAND ----------
-
-tiny_imagenet_train = tiny_imagenet['train']
-tiny_imagenet_test = tiny_imagenet['valid']
-
-# COMMAND ----------
-
-def transforms(examples):
-    examples["image"] = [image.convert("RGB").resize((64,64)) for image in examples["image"]]
-    return examples
-
-tiny_imagenet_train = tiny_imagenet_train.map(transforms, batched=True)
-tiny_imagenet_test = tiny_imagenet_test.map(transforms, batched=True)
-
-# COMMAND ----------
-
-labels = set(tiny_imagenet["train"]["label"])
-num_class = len(labels)
-num_class
-
-# COMMAND ----------
-
-print(f"Dataset size: {tiny_imagenet['train'].info.size_in_bytes / (1024 ** 3):.2f} gb")
-
-# COMMAND ----------
-
-import os 
-
-os.environ['MLFLOW_TRACKING_URI']
-# os.environ['MLFLOW_EXPERIMENT_NAME'] = experiment_path
-# os.environ['MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING']
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # Train with DeepSpeed without Distributor
+from deepspeed_config import deepspeed_base, shared_parameters
 
 # COMMAND ----------
 
 import argparse
 import os
 import deepspeed
-import torch
-import torchvision
-import torchvision.transforms as transforms
+from deepspeed import get_accelerator
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed.utils import logger as ds_logger
+
 import time
-from datasets import Dataset 
+import datasets
+from datasets import Dataset, load_dataset
 
-# COMMAND ----------
-
-from torchvision.models import ResNet18_Weights
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
+from torchvision.models import ResNet18_Weights
+from torch.utils.data import DataLoader
+import torchvision
+import torchvision.transforms as transforms
+
+
+import mlflow
+# from peft import get_peft_model
+
+datasets.utils.logging.disable_progress_bar()
 
 class ResNet18(nn.Module):
     def __init__(self, num_classes=200):  # num_classes for cifar is 10 
@@ -173,209 +105,150 @@ class ResNet18(nn.Module):
         
     def forward(self, x):
         return self.resnet(x)
+      
+def download_data(dataset_path: str = 'zh-plus/tiny-imagenet', cache_dir: str = None, trust_remote: bool = False):
 
-# COMMAND ----------
+  print(f"Loaded dataset with path: {dataset_path}")
 
-# DBTITLE 1,Hyperparameters
-batch_size = 64
-epochs = 5
+  if cache_dir:
+    loaded_dataset = load_dataset(dataset_path, cache_dir=cache_dir, trust_remote_code=trust_remote)
+  else: 
+    loaded_dataset = load_dataset(dataset_path, trust_remote_code=trust_remote)
 
-# COMMAND ----------
-
-# Apply transformations directly to the dataset
-train_dataset =  Dataset.from_dict({"image": tiny_imagenet_train['image'], "label": tiny_imagenet_train["label"]}).with_format("torch", device="cuda")
-test_dataset =  Dataset.from_dict({"image": tiny_imagenet_test['image'], "label": tiny_imagenet_test["label"]}).with_format("torch", device="cuda")
-
-train_data_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-test_data_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size)
-
-# COMMAND ----------
-
-
-transform = transforms.Compose(
-    [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
-)
-
-# COMMAND ----------
-
-def full_train_loop(peft_config, training_arguments, dataset, 
-                    distributor:bool=True, mlflow_parent_run=None):
-
-    """
-    Deepspeed isn't handling train_batch here if it is string:
-    https://github.com/microsoft/DeepSpeed/blob/f57fc4c95a6a5194757b57704f60f009dde25680/deepspeed/runtime/config.py#L903
-    guessing we need to specify a batch size which means we need to calculate it all first
-    """
-
-    import os
-    import mlflow
-
-    import torch
-    from torch.utils.data import DataLoader
+  # if dataset_path == 'zh-plus/tiny-imagenet':
+  #   def transforms(examples):
+  #     examples["image"] = [image.convert("RGB").resize((64,64)) for image in examples["image"]]
+  #     return examples
     
-    import deepspeed
-    from deepspeed import get_accelerator
-    from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+  #   loaded_dataset = loaded_dataset.map(transforms, batched=True)
 
-    from transformers import (
-       AutoModelForCausalLM, AutoTokenizer,
-       DataCollatorForLanguageModeling
-    )
-    from peft import get_peft_model
-    from deepspeed.utils import logger as ds_logger
+  return loaded_dataset 
 
-    os.environ['MLFLOW_TRACKING_URI'] = 'databricks'
-    os.environ['MLFLOW_EXPERIMENT_NAME'] = experiment_path
-    os.environ['MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING'] = 'true'
-    #os.environ['HF_MLFLOW_LOG_ARTIFACTS'] = 'True'
-    
-    os.environ['DATABRICKS_HOST'] = db_host
-    os.environ['DATABRICKS_TOKEN'] = db_token
+def train_loop(dataset_path: str = 'zh-plus/tiny-imagenet', cache_dir: str = None, offload_device: str = "cpu", epochs: int = 5, learning_rate: float = 1e-4, batch_size: int = 64, trust_remote: bool = False, distributor:bool=True, mlflow_parent_run=None, deepspeed_config=None):
 
-    if distributor:
+  import os
+  import mlflow
+
+  import torch
+  from torch.utils.data import DataLoader
+  
+  import deepspeed
+  from deepspeed import get_accelerator
+  from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+
+  from deepspeed.utils import logger as ds_logger
+
+  print(f"Starting training loop with arguments: batch_size={batch_size}, dataset_path={dataset_path}, cache_dir={cache_dir}, trust_remote={trust_remote}, distributor={distributor}, mlflow_parent_run={mlflow_parent_run}")
+
+  local_rank = int(os.environ["LOCAL_RANK"])
+  torch.cuda.set_device(local_rank)
+  deepspeed.init_distributed()
+  device = torch.device(get_accelerator().device_name())
+  global_rank = torch.distributed.get_rank()
+
+  loaded_dataset = download_data(cache_dir='/Volumes/will_smith/datasets/imagenet_tiny', trust_remote=True)
+
+  train_dataset = loaded_dataset.get('train', None)
+  test_dataset = loaded_dataset.get('valid', None)
+
+  if train_dataset == None or test_dataset == None: 
+    raise Exception("Dataset not found. Please download the dataset and set the cache_dir to the path of the dataset.")
+
+  # Apply transformations directly to the dataset
+  train_dataset =  Dataset.from_dict({"image": train_dataset['image'], "label": train_dataset["label"]}).with_format("torch", device="cuda")
+  test_dataset =  Dataset.from_dict({"image": test_dataset['image'], "label": test_dataset["label"]}).with_format("torch", device="cuda")
+
+  train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+  test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size)
+  
+  if distributor:
         os.environ['NCCL_IB_DISABLE'] = '1'
         os.environ['NCCL_P2P_DISABLE'] = '1'
 
-    mlflow.set_registry_uri('databricks')
+  # We need different optimizer depending on whether it is using offload or not
+  if offload_device == 'cpu':
+      AdamOptimizer = DeepSpeedCPUAdam 
+  else:
+      AdamOptimizer = FusedAdam
 
-    model_path = f'{model_cache_root}/llama_3_1_8b/'
+  
+  model = ResNet18().to(local_rank)
 
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    deepspeed.init_distributed()
-    device = torch.device(get_accelerator().device_name())
-    global_rank = torch.distributed.get_rank()
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        #device_map = {"":int(local_rank)},
-        torch_dtype=torch.bfloat16,
-        cache_dir=model_path,
-        local_files_only=True,
-        low_cpu_mem_usage=False
-    )
-
-    model = get_peft_model(model, peft_config)
-
-    # Setup tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=model_path)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    train_dataset = setup_data(tokenizer, dataset)
-
-    # removve string columns
-    train_dataset = train_dataset.remove_columns(['text', 'category', 'instruction', 
-                                                 'context', 'response'])
-
-    # setup trainer
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer, mlm=False
-    )
-
-    train_dataloader = DataLoader(
-       train_dataset,
-       collate_fn = data_collator,
-       batch_size = training_arguments.per_device_train_batch_size
-    )
-
-    deepspeed_arg = training_arguments.deepspeed
-    ds_logger.info(f'deepspeed argument is of type: {type(deepspeed_arg)}')
-
-    # Deepspeed Args can be a dict or a string
-    ## When it is a string we need to load the file first into a dict
-    if type(deepspeed_arg) == str:
-        import json
-        with open(training_arguments.deepspeed, 'r') as file:
-            deepspeed_config_load = json.load(file)
-
-    elif type(deepspeed_arg) == dict:
-        deepspeed_config_load = deepspeed_arg
-
-    try: 
-        offload_device = deepspeed_config_load['zero_optimization']['offload_optimizer']['device']
-        ds_logger.info(f'DeepSpeed Offload: {offload_device}')
-    except (TypeError, KeyError) as e:
-        ds_logger.info(f'Offload detection error: {e}')
-        offload_device = None
-
-    # We need different optimizer depending on whether it is using offload or not
-    if offload_device == 'cpu':
-       AdamOptimizer = DeepSpeedCPUAdam 
-    else:
-       AdamOptimizer = FusedAdam
+  optimizer = AdamOptimizer(model.parameters(),
+    lr=learning_rate,
+    betas=(0.9, 0.95))
     
-    optimizer = AdamOptimizer(model.parameters(),
-                              lr=training_arguments.learning_rate,
-                              betas=(0.9, 0.95))
- 
-    # model, optimizer
-    initialised_var  = deepspeed.initialize(
-       model = model,
-       optimizer = optimizer,
-       dist_init_required=False,
-       config = training_arguments.deepspeed
-    )
+  # model, optimizer
+  model_engine, optimizer, _, _  = deepspeed.initialize(
+      model = model,
+      optimizer = optimizer,
+      dist_init_required=False,
+    #  config = training_arguments.deepspeed
+  )
 
-    model = initialised_var[0]
-    optimizer = initialised_var[1]
+  print("Created model engine and optimizer successfully!")
 
-    # with manual loop we will have to add manual mlflow
-    # variables:
-    # training_arguments, model, train_dataloader
-    # device 
+  # Now we can start the run loop
+  for epoch in range(epochs):
+    model.train()
 
-    ## setup distributed mlflow system metric logging
-    ## We want to log system usage on all nodes so we need to make sure that they are all
-    ## nested back with the correct parent
+    for step, batch in enumerate(train_dataloader):
+        batch.to(device)
+        outputs = model(**batch, use_cache=False)
 
-    if mlflow_parent_run:
-        from mlflow.utils.mlflow_tags import MLFLOW_PARENT_RUN_ID  
-        run_tags = {MLFLOW_PARENT_RUN_ID: mlflow_parent_run.info.run_id}
-    else:
-        run_tags = {}
+        loss = outputs.loss
 
-    ds_logger.info(f'run_tags are: {run_tags}')
+        model.backward(loss)
+        model.step()
 
-    # We want to log all configs and track loss on our primary node
-    # But not on the other mlflow runs that exist just to log system stats
-    if global_rank == 0:
-        active_run = mlflow.start_run(run_name=training_arguments.run_name,
-                                      tags=run_tags)
+        run_dict = {
+            'train_loss': loss,
+            'step': step
+          }
 
-        # Manually log the training_arguments
-        mlflow.log_params(training_arguments.to_dict())
+        # we need to make sure step is defined properly
+        # We also only log loss on rank 0 node
+        # if global_rank == 0:
+        #   mlflow.log_metrics(metrics=run_dict, step=step) if global_rank == 0 else None
 
-        ## Deepspeed config needs to be unpacked separately
-        ## some DS variables overlap with HF ones
-        mod_ds_args = {"ds_" + key: value for key, value in deepspeed_config_load.items()}
-        mlflow.log_params(mod_ds_args)
+  return 'done'
+
+# COMMAND ----------
+
+from pyspark.ml.deepspeed.deepspeed_distributor import DeepspeedTorchDistributor
+import mlflow
     
-    else:
-        active_run = mlflow.start_run(run_name=f"{training_arguments.run_name}_rank_{global_rank}",
-                                      tags=run_tags)
+def deepspeed_train(parent_run: str):
+        
+    trainer = train_loop(dataset_path= 'zh-plus/tiny-imagenet', cache_dir="/Volumes/will_smith/datasets/imagenet_tiny", offload_device= "cpu", epochs= 5, learning_rate=1e-4, batch_size= 64, trust_remote=True, distributor=True, mlflow_parent_run=parent_run)
+
+    return trainer
+    
+num_gpus = 4
+num_nodes = 1
+num_processes = num_gpus * num_nodes
+local_status = True if num_nodes == 1 else False
+
+deepspeed_dict = deepspeed_base
+
+deepspeed_dict['train_batch_size'] = (
+    shared_parameters["per_device_batch_size"] *
+    shared_parameters["gradient_accumulation_steps"] *
+    num_processes
+)
+
+if num_nodes > 1:
+    mlflow.set_experiment(experiment_path)
+    parent_run = mlflow.start_run(
+        run_name='deepspeed_distributor_w_config_low_level')
+else:
+    parent_run = None
+
+distributor = DeepspeedTorchDistributor(numGpus=num_gpus, nnodes=num_nodes, localMode=local_status, 
+                                            useGpu=True, deepspeedConfig =deepspeed_dict)
+
+completed_trainer = distributor.run(deepspeed_train, parent_run)
+
+# COMMAND ----------
 
 
-    # Now we can start the run loop
-    for epoch in range(training_arguments.num_train_epochs):
-      model.train()
-
-      for step, batch in enumerate(train_dataloader):
-          batch.to(device)
-          outputs = model(**batch, use_cache=False)
-
-          loss = outputs.loss
-
-          model.backward(loss)
-          model.step()
-
-          run_dict = {
-              'train_loss': loss,
-              'step': step
-            }
-
-          # we need to make sure step is defined properly
-          # We also only log loss on rank 0 node
-          if global_rank == 0:
-            mlflow.log_metrics(metrics=run_dict, step=step) if global_rank == 0 else None
-
-    return 'done'
