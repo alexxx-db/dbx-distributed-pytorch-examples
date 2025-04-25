@@ -174,3 +174,12 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Custom
+local_config.yaml
+data/
+
+WIP/
+05_ray/
+04_accelerate/
+03_composer/

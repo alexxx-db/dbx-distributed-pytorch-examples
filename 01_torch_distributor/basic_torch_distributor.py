@@ -12,7 +12,7 @@
 # MAGIC - Learn how the TorchDistributor can be leveraged to help you scale up the model training across multiple GPUs or multiple nodes. 
 # MAGIC
 # MAGIC ## Requirements
-# MAGIC - Databricks Runtime ML 13.0 and above
+# MAGIC - Databricks Runtime ML 15.4 LTS and above
 # MAGIC - This notebook should be run on a cluster with Single User access mode. If the cluster should be shared with other team members, contact your Databricks account team for solutions.
 # MAGIC - (Recommended) GPU instances [AWS](https://docs.databricks.com/clusters/gpu.html) | [Azure](https://learn.microsoft.com/en-gb/azure/databricks/clusters/gpu) | [GCP](https://docs.gcp.databricks.com/clusters/gpu.html)
 
@@ -28,18 +28,19 @@
 
 # COMMAND ----------
 
+# MAGIC %run ../setup/00_setup
+
+# COMMAND ----------
+
+# MAGIC %pip install -r ../requirements.txt  
+
+# COMMAND ----------
+
 import mlflow
 
-username = spark.sql("SELECT current_user()").first()['current_user()']
-username
+notebook_name = dbutils.entry_point.getDbutils().notebook().getContext().notebookPath().get().split('/')[-1]
 
-experiment_path = f'/Users/{username}/pytorch-distributor'
-
-# Retrieve workspace URL and API token using dbutils notebook commands
-db_host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
-db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
-
-# Manually create the experiment so that you know the ID and can send that to the worker nodes when you are ready to scale
+experiment_path = f'/Users/{username}/experiments/{notebook_name}'
 experiment = mlflow.set_experiment(experiment_path)
 
 # COMMAND ----------
@@ -58,14 +59,10 @@ NUM_GPUS_PER_NODE = torch.cuda.device_count()
 
 # COMMAND ----------
 
-NUM_GPUS_PER_NODE
-
-# COMMAND ----------
-
 PYTORCH_DIR = '/dbfs/ml/pytorch'
 
 batch_size = 100
-num_epochs = 50
+num_epochs = 10 # changed from 50 
 momentum = 0.5
 log_interval = 100
 learning_rate = 0.001
@@ -200,8 +197,8 @@ with mlflow.start_run():
   train(base_log_dir)
   test(base_log_dir)
   
-elapsed = timeit.default_timer() - start_time
-print(f"Elapsed time: {elapsed} seconds")
+local_elapsed = timeit.default_timer() - start_time
+print(f"Elapsed time: {local_elapsed} seconds")
 
 # COMMAND ----------
 
@@ -346,15 +343,8 @@ start_time = timeit.default_timer()
 
 main_fn(single_node_single_gpu_dir)
 
-elapsed = timeit.default_timer() - start_time
-print(f"Elapsed time: {elapsed} seconds")
-
-# COMMAND ----------
-
-# # single node distributed run to quickly test that the whole process is working
-# with mlflow.start_run():
-#   mlflow.log_param('run_type', 'test_dist_code')
-#   main_fn(single_node_single_gpu_dir)
+single_gpu_elapsed = timeit.default_timer() - start_time
+print(f"Elapsed time: {single_gpu_elapsed} seconds")
 
 # COMMAND ----------
 
@@ -372,81 +362,29 @@ import timeit
 
 start_time = timeit.default_timer()
 
-output = TorchDistributor(num_processes=2, local_mode=True, use_gpu=True).run(main_fn, single_node_multi_gpu_dir)
+num_gpus = torch.cuda.device_count()
 
-elapsed = timeit.default_timer() - start_time
-print(f"Elapsed time: {elapsed} seconds")
+output = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(main_fn, single_node_multi_gpu_dir)
+
+multi_gpu_elapsed = timeit.default_timer() - start_time
+print(f"Elapsed time: {multi_gpu_elapsed} seconds")
 
 test(single_node_multi_gpu_dir)
 
 # COMMAND ----------
 
-# MAGIC %md ### Multi-node training
-# MAGIC
-# MAGIC To move from single node multi-GPU training to multi-node training, you just change `num_processes` to the number of GPUs that you want to use across all worker nodes. This example uses all available GPUs (`NUM_GPUS_PER_NODE * NUM_WORKERS`). You also change `local_mode` to `False`. Additionally, to configure how many GPUs to use for each Spark task that runs the train function, `set spark.task.resource.gpu.amount <num_gpus_per_task>` in the Spark Config cell on the cluster page before creating the cluster.
+print(f"Local Single GPU Elapsed Time: {local_elapsed} seconds")
+print(f"Single GPU Elapsed Time: {single_gpu_elapsed} seconds")
+print(f"Multi GPU Elapsed Time: {multi_gpu_elapsed} seconds")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC : org.apache.spark.SparkException: Job aborted due to stage failure: Could not recover from a failed barrier ResultStage. Most recent failure reason: Stage failed because barrier task ResultTask(5, 0) finished unsuccessfully.
-# MAGIC
+# MAGIC ### Clear usage of the GPUs
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC [W socket.cpp:432] [c10d] While waitForInput, poolFD failed with (errno: 0 - Success).
-# MAGIC
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951] Error waiting on exit barrier. Elapsed: 300.10335206985474 seconds
-# MAGIC
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC [W socket.cpp:432] [c10d] While waitForInput, poolFD failed with (errno: 0 - Success).
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951] Error waiting on exit barrier. Elapsed: 300.10335206985474 seconds
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951] Traceback (most recent call last):
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]   File "/databricks/python/lib/python3.11/site-packages/torch/distributed/elastic/agent/server/api.py", line 937, in _exit_barrier
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]     store_util.barrier(
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]   File "/databricks/python/lib/python3.11/site-packages/torch/distributed/elastic/utils/store.py", line 78, in barrier
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]     synchronize(store, data, rank, world_size, key_prefix, barrier_timeout)
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]   File "/databricks/python/lib/python3.11/site-packages/torch/distributed/elastic/utils/store.py", line 64, in synchronize
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]     agent_data = get_all(store, rank, key_prefix, world_size)
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]   File "/databricks/python/lib/python3.11/site-packages/torch/distributed/elastic/utils/store.py", line 34, in get_all
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]     data = store.get(f"{prefix}{idx}")
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-# MAGIC E0319 23:40:35.118955 139795948843008 torch/distributed/elastic/agent/server/api.py:951] torch.distributed.DistStoreError: Socket Timeout
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC  An error occurred while calling o653.collectToPython.
-# MAGIC : org.apache.spark.SparkException: Job aborted due to stage failure: Could not recover from a failed barrier ResultStage. Most recent failure reason: Stage failed because barrier task ResultTask(6, 0) finished unsuccessfully.
-
-# COMMAND ----------
-
-multi_node_dir = create_log_dir()
-print("Data is located at: ", multi_node_dir)
-
-from pyspark.ml.torch.distributor import TorchDistributor
-import timeit
-
-start_time = timeit.default_timer()
-
-output_dist = TorchDistributor(num_processes=(NUM_GPUS_PER_NODE * NUM_WORKERS), local_mode=False, use_gpu=True).run(main_fn, multi_node_dir)
-
-elapsed = timeit.default_timer() - start_time
-print(f"Elapsed time: {elapsed} seconds")
-
-test(multi_node_dir)
-
-# COMMAND ----------
-
-mlflow.end_run()
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
