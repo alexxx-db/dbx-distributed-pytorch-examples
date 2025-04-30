@@ -20,6 +20,7 @@ secret_key = config.get("secret_key")
 cifar_cache = config.get("cifar_cache")
 tiny_imagenet_cache = config.get("tiny_imagenet_cache")
 imagenet1k_cache = config.get("imagenet1k_cache")
+coco_cache = config.get("coco_cache")
 
 # COMMAND ----------
 
@@ -45,6 +46,10 @@ except Exception as e:
     print(f"Error: Could not create schema due to {e}")
 try:
     spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.imagenet_1k")
+except Exception as e:
+    print(f"Error: Could not create schema due to {e}")
+try:
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.ms_coco")
 except Exception as e:
     print(f"Error: Could not create schema due to {e}")
 
