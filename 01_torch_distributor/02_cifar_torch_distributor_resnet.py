@@ -1,18 +1,17 @@
 # Databricks notebook source
-# MAGIC %run ../setup/00_setup
+# MAGIC %pip install -r ../requirements.txt  
+# MAGIC %restart_python
 
 # COMMAND ----------
 
-# MAGIC %pip install -r ../requirements.txt  
+# MAGIC %run ../setup/00_setup
 
 # COMMAND ----------
 
 import os
 
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/cifar"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
+
+os.environ['HF_DATASETS_CACHE'] = cifar_cache
 
 # COMMAND ----------
 
@@ -59,7 +58,7 @@ def create_log_dir():
 from utils import hf_dataset_utilities as hf_util
 
 cifar_dataset = hf_util.hfds_download_volume(
-  hf_cache = HF_DATASETS_CACHE ,
+  hf_cache = cifar_cache ,
   dataset_path= 'uoft-cs/cifar10',
   trust_remote_code = True, 
   disable_progress = False, 
@@ -315,8 +314,10 @@ from pyspark.ml.torch.distributor import TorchDistributor
 timer = hf_util.Timer()
 
 num_gpus = torch.cuda.device_count()
+# TODO Update epochs as needed
+num_epochs = 1
 
-output = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=50, batch_size = 1024, train_dataset = train_dataset, test_dataset = test_dataset)
+output = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=num_epochs, batch_size = 1024, train_dataset = train_dataset, test_dataset = test_dataset)
 
 sn_mgpu_elapsed = timer.stop()
 print(f"Elapsed time: {sn_mgpu_elapsed} seconds")

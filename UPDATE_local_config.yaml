@@ -1,0 +1,8 @@
+catalog: ""
+schema: ""
+num_nodes: 1
+secret_scope: ""
+secret_key: ""
+cifar_cache: "/Volumes/catalog/datasets/cifar"
+tiny_imagenet_cache: "/Volumes/catalog/datasets/tiny_imagenet"
+imagenet1k_cache: "/Volumes/catalog/datasets/imagenet_1k"

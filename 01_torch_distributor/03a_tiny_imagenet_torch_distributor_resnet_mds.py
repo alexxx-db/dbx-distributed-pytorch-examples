@@ -42,25 +42,14 @@ def create_log_dir():
 
 import os
 
-catalog = "will_smith"
-schema = "datasets"
-volume_name = "tiny_imagenet"
-
-HF_DATASETS_CACHE = f"/Volumes/{catalog}/{schema}/{volume_name}"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
-
-# COMMAND ----------
-
-spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.{volume_name}")
+os.environ['HF_DATASETS_CACHE'] = tiny_imagenet_cache
 
 # COMMAND ----------
 
 from utils import hf_dataset_utilities as hf_util
 
 tiny_imagenet = hf_util.hfds_download_volume(
-  hf_cache = HF_DATASETS_CACHE ,
+  hf_cache = os.environ['HF_DATASETS_CACHE'] ,
   dataset_path= 'zh-plus/tiny-imagenet',
   trust_remote_code = True, 
   disable_progress = False, 
@@ -225,13 +214,17 @@ except Exception as e:
 
 out_root = f'{mds_volume_path}/mds_datasets/test/'
 
-with MDSWriter(out=out_root, columns=columns, compression=compression) as out:
-    for record in tiny_imagenet['valid']:
-        sample = {
-            "image": record['image'],
-            "label": record['label']
-        }
-        out.write(sample)
+try:
+    with MDSWriter(out=out_root, columns=columns, compression=compression) as out:
+        for record in tiny_imagenet['valid']:
+            sample = {
+                "image": record['image'],
+                "label": record['label']
+            }
+            out.write(sample)
+            
+except Exception as e:
+    print(f"An error occurred: {e}")
 
 # COMMAND ----------
 
@@ -297,6 +290,12 @@ test_dataset  = TinyImageNetMDS(remote_test, local_test, False, batch_size=batch
 import mlflow
 
 mlflow.autolog(disable=True)
+
+# COMMAND ----------
+
+import streaming
+
+streaming.base.util.clean_stale_shared_memory()
 
 # COMMAND ----------
 
@@ -556,8 +555,9 @@ from pyspark.ml.torch.distributor import TorchDistributor
 timer = hf_util.Timer()
 
 num_gpus = torch.cuda.device_count()
+num_epochs = 1 
 
-model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=1, batch_size = 512)
+model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=num_epochs, batch_size = 512)
 
 sn_mgpu_elapsed = timer.stop()
 print(f"Elapsed time: {sn_mgpu_elapsed} seconds")
@@ -603,8 +603,9 @@ from pyspark.ml.torch.distributor import TorchDistributor
 timer = hf_util.Timer()
 
 num_gpus = torch.cuda.device_count()
+num_epochs = 150
 
-trained_model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=150, batch_size = 512)
+trained_model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=num_epochs, batch_size = 512)
 
 longer_train_elapsed = timer.stop()
 print(f"Elapsed time: {longer_train_elapsed:.2f} seconds")
@@ -653,3 +654,7 @@ print(f"True class: {test_dataset.labels[0]}")
 # COMMAND ----------
 
 # MAGIC %restart_python
+
+# COMMAND ----------
+
+

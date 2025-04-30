@@ -4,9 +4,22 @@
 
 # COMMAND ----------
 
-catalog = "will_smith"
-schema = "datasets"
-num_nodes = 1
+import yaml
+
+config_path = "../local_config.yaml"
+with open(config_path, 'r') as config_file:
+    config = yaml.safe_load(config_file)
+
+# COMMAND ----------
+
+catalog = config.get("catalog")
+schema = config.get("schema")
+num_nodes = config.get("num_nodes", 1)
+secret_scope = config.get("secret_scope")
+secret_key = config.get("secret_key")
+cifar_cache = config.get("cifar_cache")
+tiny_imagenet_cache = config.get("tiny_imagenet_cache")
+imagenet1k_cache = config.get("imagenet1k_cache")
 
 # COMMAND ----------
 
@@ -16,7 +29,22 @@ except Exception as e:
     print(f"Error: Could not create catalog due to {e}")
 
 try:
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
+except Exception as e:
+    print(f"Error: Could not create schema due to {e}")
+
+# COMMAND ----------
+
+try:
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.cifar")
+except Exception as e:
+    print(f"Error: Could not create schema due to {e}")
+try:
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.tiny_imagenet")
+except Exception as e:
+    print(f"Error: Could not create schema due to {e}")
+try:
+    spark.sql(f"CREATE VOLUME IF NOT EXISTS {catalog}.{schema}.imagenet_1k")
 except Exception as e:
     print(f"Error: Could not create schema due to {e}")
 
@@ -38,7 +66,7 @@ os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
 from huggingface_hub import login
 
 try:
-  login(token=dbutils.secrets.get('william_smith_secrets', 'HF_KEY'))
+  login(token=dbutils.secrets.get(secret_scope, secret_key))
   print("Successfully logged in to huggingface!")
 except Exception as e:
   print(f"Error: Could not log into huggingface due to {e}")
@@ -57,24 +85,6 @@ db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().api
 
 os.environ['DATABRICKS_HOST'] = db_host
 os.environ['DATABRICKS_TOKEN'] = db_token
-
-# COMMAND ----------
-
-import yaml
-
-config_path = "../setup/local_config.yaml"
-with open(config_path, 'r') as config_file:
-    config = yaml.safe_load(config_file)
-
-# COMMAND ----------
-
-import mlflow
-
-username = spark.sql("SELECT current_user()").first()['current_user()']
-
-# Retrieve workspace URL and API token using dbutils notebook commands
-db_host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
-db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
 
 # COMMAND ----------
 

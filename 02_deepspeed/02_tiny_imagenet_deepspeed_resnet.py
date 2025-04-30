@@ -10,8 +10,7 @@
 
 import os
 
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/tiny_imagenet"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
+os.environ['HF_DATASETS_CACHE'] = tiny_imagenet_cache
 
 # COMMAND ----------
 
@@ -35,7 +34,7 @@ os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
 from utils import hf_dataset_utilities as hf_util
 
 tiny_imagenet = hf_util.hfds_download_volume(
-  hf_cache = HF_DATASETS_CACHE ,
+  hf_cache = os.environ['HF_DATASETS_CACHE'],
   dataset_path= 'zh-plus/tiny-imagenet',
   trust_remote_code = True, 
   disable_progress = False, 
@@ -62,8 +61,7 @@ ds_transforms = hf_util.default_image_transforms(
 
 # COMMAND ----------
 
-train_dataset = TinyImagenetDataset(tiny_imagenet['train'],
- transform=ds_transforms)
+train_dataset = TinyImagenetDataset(tiny_imagenet['train'], transform=ds_transforms)
 test_dataset = TinyImagenetDataset(tiny_imagenet['valid'], transform=ds_transforms)
 
 # COMMAND ----------
@@ -160,7 +158,7 @@ def train_func(
   train_dataset,
   test_dataset,
   batch_size: int = 32, 
-  epochs: int = 5,
+  num_epochs: int = 5,
   mlflow_parent_run = None,
   patience: int = 3
 ):
@@ -223,7 +221,7 @@ def train_func(
 
   print(f"RANK: {local_rank}")
 
-  for epoch in range(1, epochs + 1):
+  for epoch in range(1, num_epochs + 1):
  
     # Loss function and optimizer
     loss_func = nn.CrossEntropyLoss()
@@ -253,7 +251,7 @@ def train_func(
       correct += (predicted == labels).sum().item()
 
     if local_rank == 0:
-      print(f"Epoch [{epoch}/{epochs}], Loss: {running_loss:.4f}, Accuracy: {correct / total}")
+      print(f"Epoch [{epoch}/{num_epochs}], Loss: {running_loss:.4f}, Accuracy: {correct / total}")
 
     if local_rank == 0:
       model.eval()
@@ -307,7 +305,7 @@ def train_func(
 
 # COMMAND ----------
 
-trained_model = dist.run(train_func, epochs=3, batch_size = 256, train_dataset = train_dataset, test_dataset = test_dataset)
+trained_model = dist.run(train_func, num_epochs=1, batch_size = 256, train_dataset = train_dataset, test_dataset = test_dataset)
 
 # COMMAND ----------
 
@@ -348,3 +346,7 @@ print(f"True class: {test_dataset.labels[0]}")
 
 # DBTITLE 1,Clear  GPU Memory
 # MAGIC %restart_python 
+
+# COMMAND ----------
+
+

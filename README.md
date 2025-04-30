@@ -6,6 +6,10 @@ This repository contains examples and utilities for performing distributed deep 
 
 Training deep learning models at scale requires distributed training capabilities. This repository demonstrates how to leverage different distributed training frameworks on Databricks to accelerate model training for computer vision tasks.
 
+## GPU Utilization Example
+We can split our training across multiple GPUs and even multiple nodes with GPUs to expedite training.
+![GPU Utilization](assets/gpu_utilization.png)
+
 ## Supported Datasets
 
 - CIFAR-10/100

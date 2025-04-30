@@ -54,7 +54,7 @@ experiment = mlflow.set_experiment(experiment_path)
 # COMMAND ----------
 
 import torch
-NUM_WORKERS = 2
+NUM_WORKERS = num_nodes
 NUM_GPUS_PER_NODE = torch.cuda.device_count()
 
 # COMMAND ----------

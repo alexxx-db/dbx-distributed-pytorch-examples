@@ -10,8 +10,7 @@
 
 import os
 
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/cifar"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
+os.environ['HF_DATASETS_CACHE'] = cifar_cache
 
 # COMMAND ----------
 
@@ -50,7 +49,7 @@ def create_log_dir():
 from utils import hf_dataset_utilities as hf_util
 
 cifar_dataset = hf_util.hfds_download_volume(
-  hf_cache = HF_DATASETS_CACHE ,
+  hf_cache = os.environ['HF_DATASETS_CACHE'],
   dataset_path= 'uoft-cs/cifar10',
   trust_remote_code = True, 
   disable_progress = False, 

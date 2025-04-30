@@ -1,18 +1,16 @@
 # Databricks notebook source
-# MAGIC %run ../setup/00_setup
+# MAGIC %pip install -r ../requirements.txt  
+# MAGIC %restart_python
 
 # COMMAND ----------
 
-# MAGIC %pip install -r ../requirements.txt  
+# MAGIC %run ../setup/00_setup
 
 # COMMAND ----------
 
 import os
 
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/tiny_imagenet"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
+os.environ['HF_DATASETS_CACHE'] = tiny_imagenet_cache
 
 # COMMAND ----------
 
@@ -48,7 +46,7 @@ def create_log_dir():
 from utils import hf_dataset_utilities as hf_util
 
 tiny_imagenet = hf_util.hfds_download_volume(
-  hf_cache = HF_DATASETS_CACHE ,
+  hf_cache = os.environ['HF_DATASETS_CACHE'] ,
   dataset_path= 'zh-plus/tiny-imagenet',
   trust_remote_code = True, 
   disable_progress = False, 
@@ -339,8 +337,9 @@ from pyspark.ml.torch.distributor import TorchDistributor
 timer = hf_util.Timer()
 
 num_gpus = torch.cuda.device_count()
+num_epochs = 1
 
-model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=1, batch_size = 512, train_dataset = train_dataset, test_dataset = test_dataset)
+model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=num_epochs, batch_size = 512, train_dataset = train_dataset, test_dataset = test_dataset)
 
 sn_mgpu_elapsed = timer.stop()
 print(f"Elapsed time: {sn_mgpu_elapsed} seconds")
@@ -386,8 +385,9 @@ from pyspark.ml.torch.distributor import TorchDistributor
 timer = hf_util.Timer()
 
 num_gpus = torch.cuda.device_count()
+num_epochs = 100
 
-trained_model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=100, batch_size=512, train_dataset=train_dataset, test_dataset=test_dataset)
+trained_model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=num_epochs, batch_size=512, train_dataset=train_dataset, test_dataset=test_dataset)
 
 longer_train_elapsed = timer.stop()
 print(f"Elapsed time: {longer_train_elapsed:.2f} seconds")
@@ -436,3 +436,7 @@ print(f"True class: {test_dataset.labels[0]}")
 # COMMAND ----------
 
 # MAGIC %restart_python
+
+# COMMAND ----------
+
+

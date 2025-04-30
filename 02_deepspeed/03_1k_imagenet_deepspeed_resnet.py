@@ -10,8 +10,7 @@
 
 import os
 
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/imagenet_1k"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
+os.environ['HF_DATASETS_CACHE'] = imagenet1k_cache
 
 # COMMAND ----------
 
@@ -22,7 +21,7 @@ os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
 from utils import hf_dataset_utilities as hf_util
 
 imagenet_1k = hf_util.hfds_download_volume(
-  hf_cache = HF_DATASETS_CACHE ,
+  hf_cache = os.environ['HF_DATASETS_CACHE'],
   dataset_path= 'ILSVRC/imagenet-1k',
   trust_remote_code = True, 
   disable_progress = False, 
