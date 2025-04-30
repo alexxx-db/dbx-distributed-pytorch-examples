@@ -1,10 +1,19 @@
 # Distributed PyTorch Training on Databricks
 
-This repository contains examples and utilities for performing distributed deep learning training on Databricks using various frameworks with PyTorch. The examples focus on image classification tasks using popular datasets and model architectures.
+This repository contains examples and utilities for performing distributed deep learning training on Databricks using various frameworks with PyTorch. The examples focus on image classification tasks using popular datasets and model architectures. This is NOT an official Databricks repository. 
 
 ## Overview
 
 Training deep learning models at scale requires distributed training capabilities. This repository demonstrates how to leverage different distributed training frameworks on Databricks to accelerate model training for computer vision tasks.
+
+## Cluster Config:
+
+Confirmed for DBR:
+- 15.4.x-gpu-ml-scala2.12
+  
+Cluster Spec used: 
+- g5.24xlarge [A10G]
+- 384 GB Memory, 4 GPUs
 
 ## GPU Utilization Example
 We can split our training across multiple GPUs and even multiple nodes with GPUs to expedite training.
@@ -51,7 +60,7 @@ This repository includes examples for the following distributed training framewo
 
 ### Prerequisites
 
-- Databricks Runtime for Machine Learning (DBR ML) 12.0 or later
+- Databricks Runtime for Machine Learning (DBR ML) 15.4 or later
 - GPU-enabled Databricks cluster
 
 ### Installation
