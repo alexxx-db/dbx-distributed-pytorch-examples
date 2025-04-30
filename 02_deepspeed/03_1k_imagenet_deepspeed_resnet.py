@@ -1,10 +1,17 @@
 # Databricks notebook source
-# MAGIC %pip install deepspeed
+# MAGIC %pip install -r requirements.txt
 # MAGIC %restart_python
 
 # COMMAND ----------
 
-# MAGIC %run ../../setup/00_setup
+# MAGIC %run ../setup/00_setup
+
+# COMMAND ----------
+
+import os
+
+HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/imagenet_1k"
+os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
 
 # COMMAND ----------
 
@@ -12,26 +19,55 @@
 
 # COMMAND ----------
 
-import mlflow
-import os
+from utils import hf_dataset_utilities as hf_util
 
-username = spark.sql("SELECT current_user()").first()['current_user()']
-username
+imagenet_1k = hf_util.hfds_download_volume(
+  hf_cache = HF_DATASETS_CACHE ,
+  dataset_path= 'ILSVRC/imagenet-1k',
+  trust_remote_code = True, 
+  disable_progress = False, 
+)
 
-experiment_path = f'/Users/{username}/deepspeed-distributor'
+# COMMAND ----------
 
-browser_host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().browserHostName().get()
+imagenet_1k
 
-db_host = f"https://{browser_host}"
-db_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+# COMMAND ----------
 
-os.environ['DATABRICKS_HOST'] = db_host
-os.environ['DATABRICKS_TOKEN'] = db_token
+Imagenet1KDataset = hf_util.create_torch_image_dataset(
+  image_key="image",
+  label_key="label"
+)
 
-# Manually create the experiment so that you know the ID and can send that to the worker nodes when you are ready to scale
-experiment = mlflow.set_experiment(experiment_path)
+# COMMAND ----------
 
-num_nodes = 1 
+from torchvision import transforms
+
+transforms = transforms.Compose([
+    transforms.RandomResizedCrop(224),            # Random crop to 224x224
+    transforms.RandomHorizontalFlip(),            # Random horizontal flip
+    transforms.ToTensor(),                        # Convert PIL image to Tensor
+    transforms.Normalize(                         # Normalize using ImageNet stats
+        mean=[0.485, 0.456, 0.406],                # RGB mean
+        std=[0.229, 0.224, 0.225]                  # RGB std
+    ),
+])
+
+# COMMAND ----------
+
+train_dataset = Imagenet1KDataset(imagenet_1k['train'],
+ transform=transforms)
+test_dataset = Imagenet1KDataset(imagenet_1k['valid'], transform=transforms)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Training Func
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC When operating in a standard notebook environment, the Python session is initiated with a login token for MLflow. When running DeepSpeed, however, individual GPUs will each have a separate Python process that does not inherit these credentials. To proceed, we can save these parameters to Python variables using dbutils, then assign them to environment variables within the function that DeepspeedTorchDistributor will distribute.
 
 # COMMAND ----------
 
@@ -58,101 +94,6 @@ dist = DeepspeedTorchDistributor(
 
 # COMMAND ----------
 
-import os
-
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/tiny_imagenet"
-os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
-
-# COMMAND ----------
-
-# MAGIC %sh 
-# MAGIC
-# MAGIC export TORCH_DISTRIBUTED_DEBUG="DETAIL"
-# MAGIC export TORCH_CPP_LOG_LEVEL="INFO"
-# MAGIC export TORCH_SHOW_CPP_STACKTRACES="1"
-# MAGIC export NCCL_DEBUG="INFO"
-# MAGIC export NCCL_DEBUG_SUBSYS="1"
-
-# COMMAND ----------
-
-from datasets import load_dataset
-import datasets
-
-# datasets.utils.logging.disable_progress_bar()
-tiny_imagenet = load_dataset('zh-plus/tiny-imagenet', cache_dir=HF_DATASETS_CACHE, trust_remote_code=True)
-
-# COMMAND ----------
-
-tiny_imagenet
-
-# COMMAND ----------
-
-labels = set(tiny_imagenet["train"]["label"])
-num_class = len(labels)
-
-# COMMAND ----------
-
-import torch
-from torch.utils.data import Dataset
-
-class TinyImagenetDataset(Dataset):
-    def __init__(self, data, transform=None):
-        self.images = data['image']
-        self.labels = data['label']
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.images)
-
-    def __getitem__(self, idx):
-        image = self.images[idx]
-        label = self.labels[idx]
-        
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, label
-
-# COMMAND ----------
-
-from torchvision import transforms
-
-transforms = transforms.Compose([
-    transforms.Resize((64, 64)),                  # Resize to 64x64
-    transforms.RandomHorizontalFlip(),            # Random horizontal flip
-    transforms.ToTensor(),                        # Convert PIL image to Tensor
-    transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.size(0) == 1 else x),  # Convert grayscale to RGB
-    transforms.Normalize(                         # Normalize using ImageNet stats
-        mean=[0.485, 0.456, 0.406],                # RGB mean
-        std=[0.229, 0.224, 0.225]                  # RGB std
-    ),
-])
-
-# COMMAND ----------
-
-train_dataset = TinyImagenetDataset(tiny_imagenet['train'], transform=transforms)
-test_dataset = TinyImagenetDataset(tiny_imagenet['valid'], transform=transforms)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # Training Func
-
-# COMMAND ----------
-
-import mlflow
-
-mlflow.autolog(disable=True)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC When operating in a standard notebook environment, the Python session is initiated with a login token for MLflow. When running DeepSpeed, however, individual GPUs will each have a separate Python process that does not inherit these credentials. To proceed, we can save these parameters to Python variables using dbutils, then assign them to environment variables within the function that DeepspeedTorchDistributor will distribute.
-
-# COMMAND ----------
-
 # if num_nodes > 1:
 #         mlflow.set_experiment(experiment_path)
 #         parent_run = mlflow.start_run(
@@ -162,18 +103,12 @@ mlflow.autolog(disable=True)
 
 # COMMAND ----------
 
-# mlflow.end_run()
-
-# COMMAND ----------
-
 import torch
 
 PYTORCH_DIR = '/dbfs/ml/pytorch'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-batch_size = 64
-num_epochs = 5
 momentum = 0.5
 log_interval = 100
 learning_rate = 1e-4
@@ -185,7 +120,7 @@ import torchvision.models as models
 from torchvision.models import ResNet50_Weights
 
 class ResNet50(nn.Module):
-    def __init__(self, num_classes=200):  # num_classes for imagenet 1k is 1000
+    def __init__(self, num_classes=1000):  # num_classes for imagenet 1k is 1000
         super(ResNet50, self).__init__()
         
         # Load the pre-trained ResNet-50 model from torchvision
@@ -213,7 +148,7 @@ def train_func(
   train_dataset,
   test_dataset,
   batch_size: int = 32, 
-  epochs: int = 5,
+  num_epochs: int = 5,
   mlflow_parent_run = None
 ):
 
@@ -240,7 +175,7 @@ def train_func(
   train_parameters = {'batch_size': batch_size, 'epochs': num_epochs}
   mlflow.log_params(train_parameters)
 
-  model = ResNet50(200).to(device)
+  model = ResNet50().to(device)
 
   train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -275,7 +210,7 @@ def train_func(
   #     active_run = mlflow.start_run(run_name=f"deepspeed_cifar_{local_rank}",
   #                                     tags={})
   
-  for epoch in range(1, epochs + 1):
+  for epoch in range(1, num_epochs + 1):
  
     # Loss function and optimizer
     loss_func = nn.CrossEntropyLoss()
@@ -283,7 +218,7 @@ def train_func(
     for batch_idx, (inputs, labels) in enumerate(train_dataloader):
 
       if ((local_rank == 0) and ((batch_idx) % 10 == 0)):
-        print(f"[TRAINING] [RANK {local_rank}] Running training on samples: {batch_idx} of {len(train_dataloader)}")
+        print(f"[TRAINING] [RANK {local_rank}] Running training on samples: {batch_idx - 1} of {len(train_dataloader)}")
 
       # Extract the input (image) and label tensors
       # inputs, labels = batch['image'].float().to(device), batch['label'].long().to(device)
@@ -308,7 +243,7 @@ def train_func(
       correct += (predicted == labels).sum().item()
 
     if local_rank == 0:
-      print(f"Epoch [{epoch}/{epochs}], Loss: {running_loss:.4f}, Accuracy: {correct / total}")
+      print(f"Epoch [{epoch}/{num_epochs}], Loss: {running_loss:.4f}, Accuracy: {correct / total}")
 
   if local_rank == 0:
     print(f"Finished training, logging model from RANK {local_rank}")
@@ -326,7 +261,7 @@ def train_func(
     for batch_idx, (inputs, labels) in enumerate(test_dataloader):
 
       if ((local_rank == 0) and ((batch_idx) % 10 == 0)):
-        print(f"[VALIDATING] [RANK {local_rank}] Running validation on samples: {batch_idx} of {len(test_dataloader)}")
+        print(f"[VALIDATING] [RANK {local_rank}] Running validation on samples: {batch_idx - 1} of {len(test_dataloader)}")
 
       device = torch.device('cuda')
       inputs, labels = inputs.to(device), labels.to(device)
@@ -351,11 +286,48 @@ def train_func(
       mlflow.log_metric('val_loss', val_loss)
  
   print("Training finished.")
+  return model 
 
 # COMMAND ----------
 
-dist.run(train_func, epochs=3, batch_size = 256, train_dataset = train_dataset, test_dataset = test_dataset)
+trained_model = dist.run(train_func, epochs=1, batch_size = 32, train_dataset = train_dataset, test_dataset = test_dataset)
+
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC # Inference
 
+# COMMAND ----------
+
+test_dataset.images[0]
+
+# COMMAND ----------
+
+import torch
+from torchvision import transforms
+
+# Convert the image to a tensor
+image_tensor = transforms.ToTensor()(test_dataset.images[0])
+
+# Move the tensor to the GPU
+image_tensor = image_tensor.to(device)
+
+# COMMAND ----------
+
+# Apply unsqueeze and pass to the model
+logits = trained_model(image_tensor.unsqueeze(0))
+
+_, predicted = torch.max(logits, 1)
+
+print(f"Predicted class: {predicted[0]}")
+print(f"True class: {test_dataset.labels[0]}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Clear GPU memory
+
+# COMMAND ----------
+
+# MAGIC %restart_python 

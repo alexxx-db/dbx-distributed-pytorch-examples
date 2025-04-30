@@ -1,58 +1,21 @@
 # Databricks notebook source
-# MAGIC %run ../setup/00_setup
+# MAGIC %pip install -r requirements.txt
+# MAGIC %restart_python
 
 # COMMAND ----------
 
-# MAGIC %pip install -r ../requirements.txt  
+# MAGIC %run ../setup/00_setup
 
 # COMMAND ----------
 
 import os
 
-HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/cifar"
+HF_DATASETS_CACHE = "/Volumes/will_smith/datasets/tiny_imagenet"
 os.environ['HF_DATASETS_CACHE'] = HF_DATASETS_CACHE
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'DETAIL'
 
 # COMMAND ----------
 
 # MAGIC %sh nvidia-smi
-
-# COMMAND ----------
-
-from time import time
-
-def create_log_dir():
-  log_dir = os.path.join(PYTORCH_DIR, str(time()))
-  os.makedirs(log_dir)
-  return log_dir
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## TorchDistributor 
-# MAGIC
-# MAGIC - Prepare single node code: Prepare and test the single node code with PyTorch, PyTorch Lightning, or other frameworks that are based on PyTorch/PyTorch Lightning like, the HuggingFace Trainer API.
-# MAGIC
-# MAGIC - Prepare code for standard distributed training: You need to convert your single process training to distributed training. Have this distributed code all encompassed within one training function that you can use with the TorchDistributor.
-# MAGIC
-# MAGIC - Move imports within training function: Add the necessary imports, such as import torch, within the training function. Doing so allows you to avoid common pickling errors. Furthermore, the device_id that models and data are be tied to is determined by:
-# MAGIC
-# MAGIC - Launch distributed training: Instantiate the TorchDistributor with the desired parameters and call .run(*args) to launch training.
-# MAGIC
-# MAGIC
-
-# COMMAND ----------
-
-# DBTITLE 1,Persist dataset to UC Volumes
-from utils import hf_dataset_utilities as hf_util
-
-tiny_imagenet = hf_util.hfds_download_volume(
-  hf_cache = HF_DATASETS_CACHE ,
-  dataset_path= 'zh-plus/tiny-imagenet',
-  trust_remote_code = True, 
-  disable_progress = False, 
-)
 
 # COMMAND ----------
 
@@ -66,6 +29,17 @@ tiny_imagenet = hf_util.hfds_download_volume(
 # MAGIC |-------------|---------------|
 # MAGIC | Train       | 100,000    |
 # MAGIC | Validation  | 10,000       |
+
+# COMMAND ----------
+
+from utils import hf_dataset_utilities as hf_util
+
+tiny_imagenet = hf_util.hfds_download_volume(
+  hf_cache = HF_DATASETS_CACHE ,
+  dataset_path= 'zh-plus/tiny-imagenet',
+  trust_remote_code = True, 
+  disable_progress = False, 
+)
 
 # COMMAND ----------
 
@@ -95,6 +69,7 @@ test_dataset = TinyImagenetDataset(tiny_imagenet['valid'], transform=ds_transfor
 # COMMAND ----------
 
 num_classes = train_dataset.num_classes
+num_nodes = 1
 
 # COMMAND ----------
 
@@ -105,6 +80,29 @@ num_classes = train_dataset.num_classes
 
 # MAGIC %md
 # MAGIC When operating in a standard notebook environment, the Python session is initiated with a login token for MLflow. When running DeepSpeed, however, individual GPUs will each have a separate Python process that does not inherit these credentials. To proceed, we can save these parameters to Python variables using dbutils, then assign them to environment variables within the function that DeepspeedTorchDistributor will distribute.
+
+# COMMAND ----------
+
+import torch
+ 
+NUM_WORKERS = int(spark.conf.get("spark.databricks.clusterUsageTags.clusterWorkers", "1"))
+ 
+def get_gpus_per_worker(_):
+  import torch
+  return torch.cuda.device_count()
+ 
+NUM_GPUS_PER_WORKER = sc.parallelize(range(4), 4).map(get_gpus_per_worker).collect()[0]
+
+# COMMAND ----------
+
+from pyspark.ml.deepspeed.deepspeed_distributor import DeepspeedTorchDistributor
+ 
+dist = DeepspeedTorchDistributor(
+  numGpus=NUM_GPUS_PER_WORKER,
+  nnodes=1,
+  localMode=True,  # Distribute training across workers.
+  # deepspeedConfig=deepspeed_config
+  )
 
 # COMMAND ----------
 
@@ -123,11 +121,9 @@ PYTORCH_DIR = '/dbfs/ml/pytorch'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-batch_size = 64
-num_epochs = 5
 momentum = 0.5
 log_interval = 100
-learning_rate = 1e-4
+learning_rate = 1e-3
 
 import torch
 import torch.nn as nn
@@ -136,7 +132,7 @@ import torchvision.models as models
 from torchvision.models import ResNet50_Weights
 
 class ResNet50(nn.Module):
-    def __init__(self, num_classes=num_classes):  # num_classes for imagenet 1k is 1000
+    def __init__(self, num_classes=num_classes): 
         super(ResNet50, self).__init__()
         
         # Load the pre-trained ResNet-50 model from torchvision
@@ -195,7 +191,7 @@ def train_func(
 
   train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-  learning_rate = 1e-5
+  learning_rate = 1e-3
   betas = (0.9, 0.999)
   epsilon = 1e-08
   lr_scheduler_warmup_ratio = 0.1
@@ -311,40 +307,12 @@ def train_func(
 
 # COMMAND ----------
 
+trained_model = dist.run(train_func, epochs=3, batch_size = 256, train_dataset = train_dataset, test_dataset = test_dataset)
+
+# COMMAND ----------
+
 # MAGIC %md
-# MAGIC
-# MAGIC TorchDistributor in PySpark handles data distribution for you, including managing the distributed sampling. So, in most cases, you do not need to manually create or use a DistributedSampler when using TorchDistributor. The TorchDistributor API abstracts away the need for manual handling of data partitioning.
-
-# COMMAND ----------
-
-# MAGIC %md ## Distributed Setup
-# MAGIC
-# MAGIC When you wrap the single-node code in the `train()` function, Databricks recommends you include all the import statements inside the `train()` function to avoid library pickling issues.
-# MAGIC
-# MAGIC Everything else is what is normally required for getting distributed training to work within PyTorch.
-# MAGIC - Calling `dist.init_process_group("nccl")` at the beginning of `train()`
-# MAGIC - Calling `dist.destroy_process_group()` at the end of `train()`
-# MAGIC - Setting `local_rank = int(os.environ["LOCAL_RANK"])`
-# MAGIC - Adding a `DistributedSampler` to the `DataLoader`
-# MAGIC - Wrapping the model with a `DDP(model)`
-# MAGIC - For more information, view https://pytorch.org/tutorials/intermediate/ddp_series_multinode.html
-
-# COMMAND ----------
-
-single_node_multi_gpu_dir = create_log_dir()
-print("Data is located at: ", single_node_multi_gpu_dir)
-
-from pyspark.ml.torch.distributor import TorchDistributor
-
-timer = hf_util.Timer()
-
-num_gpus = torch.cuda.device_count()
-
-model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=1, batch_size = 512, train_dataset = train_dataset, test_dataset = test_dataset)
-
-sn_mgpu_elapsed = timer.stop()
-print(f"Elapsed time: {sn_mgpu_elapsed} seconds")
-print(f"Elapsed time: {sn_mgpu_elapsed / 60} minutes")
+# MAGIC # Inference
 
 # COMMAND ----------
 
@@ -364,7 +332,7 @@ image_tensor = image_tensor.to(device)
 # COMMAND ----------
 
 # Apply unsqueeze and pass to the model
-logits = model(image_tensor.unsqueeze(0))
+logits = trained_model(image_tensor.unsqueeze(0))
 
 _, predicted = torch.max(logits, 1)
 
@@ -374,26 +342,9 @@ print(f"True class: {test_dataset.labels[0]}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # Additional Epochs
+# MAGIC # Clear GPU memory
 
 # COMMAND ----------
 
-single_node_multi_gpu_dir = create_log_dir()
-print("Data is located at: ", single_node_multi_gpu_dir)
-
-from pyspark.ml.torch.distributor import TorchDistributor
-
-timer = hf_util.Timer()
-
-num_gpus = torch.cuda.device_count()
-
-trained_model = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=100, batch_size=512, train_dataset=train_dataset, test_dataset=test_dataset)
-
-longer_train_elapsed = timer.stop()
-print(f"Elapsed time: {longer_train_elapsed:.2f} seconds")
-print(f"Elapsed time: {longer_train_elapsed / 60:.2f} minutes")
-
-# COMMAND ----------
-
-print(f"Initial 1 Epoch Elapsed time: {sn_mgpu_elapsed:.2f} seconds")
-print(f"Initial 100 Epoch Elapsed time: {longer_train_elapsed:.2f} seconds")
+# DBTITLE 1,Clear  GPU Memory
+# MAGIC %restart_python 

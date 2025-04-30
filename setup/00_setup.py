@@ -6,11 +6,19 @@
 
 catalog = "will_smith"
 schema = "datasets"
+num_nodes = 1
 
 # COMMAND ----------
 
-spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {schema}"
+try:
+    spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
+except Exception as e:
+    print(f"Error: Could not create catalog due to {e}")
+
+try:
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+except Exception as e:
+    print(f"Error: Could not create schema due to {e}")
 
 # COMMAND ----------
 
