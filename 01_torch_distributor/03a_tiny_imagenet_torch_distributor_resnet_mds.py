@@ -1,9 +1,5 @@
 # Databricks notebook source
 # MAGIC %pip install -r ../requirements.txt  
-
-# COMMAND ----------
-
-# MAGIC %pip install mosaicml-streaming
 # MAGIC %restart_python
 
 # COMMAND ----------
@@ -354,7 +350,7 @@ def train_func(
   batch_size: int = 128, 
   epochs: int = 5,
   mlflow_run_id = None,
-  patience: int = 5
+  patience: int = 4
 ):
 
   import torch 
@@ -404,6 +400,7 @@ def train_func(
   train_parameters = {'batch_size': batch_size, 'epochs': epochs, 'learning_rate': learning_rate}
 
   train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
+  test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
 
   # Only log from rank 0
   if local_rank == 0 and mlflow_run_id:
@@ -429,7 +426,7 @@ def train_func(
     for batch_idx, (inputs, labels) in enumerate(train_dataloader):
 
       if ((local_rank == 0) and ((batch_idx) % 10 == 0)):
-        print(f"[TRAINING] [RANK {local_rank}] Running training on samples: {batch_idx} of {len(train_dataloader)}")
+        print(f"[TRAINING] [RANK {local_rank}] Running training on samples: {batch_idx + 1} of {len(train_dataloader) + 1}")
 
       inputs, labels = inputs.to(device), labels.to(device)
 
@@ -462,25 +459,24 @@ def train_func(
         mlflow.log_metric('train_accuracy', epoch_acc, step=epoch)
 
 # Evaluation and model logging from rank 0 only
-  if local_rank == 0:
-    print(f"Finished training, logging model from RANK {local_rank}")
-    
-    if mlflow_run_id:
-      mlflow.pytorch.log_model(model, "cifar_torch_distributor_resnet_mds")
-    
+    if local_rank == 0:
+      print(f"Finished training, logging model from RANK {local_rank}")
+      
+      if mlflow_run_id:
+        mlflow.pytorch.log_model(model, "cifar_torch_distributor_resnet_mds")
+      
     model.eval()
     loss_func = nn.CrossEntropyLoss()
-
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     val_loss = 0.0
     val_correct = 0
     val_total = 0
- 
+
     with torch.no_grad():
       for batch_idx, (inputs, labels) in enumerate(test_dataloader):
         if (batch_idx % 10 == 0):
-          print(f"[VALIDATING] [RANK {local_rank}] Running validation on samples: {batch_idx} of {len(test_dataloader)}")
+          if local_rank == 0: 
+            print(f"[VALIDATING] [RANK {local_rank}] Running validation on samples: {batch_idx + 1} of {len(test_dataloader) + 1}")
 
         inputs, labels = inputs.to(device), labels.to(device)
         output = model(inputs)
@@ -494,13 +490,26 @@ def train_func(
     val_loss /= len(test_dataloader)
     val_acc = val_correct / val_total
 
-    print(f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}")
+    if local_rank == 0: 
+      print(f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}")
     
     # Log validation metrics from rank 0
-    if mlflow_run_id:
+    if local_rank == 0 and mlflow_run_id:
       mlflow.log_metric('val_loss', val_loss)
       mlflow.log_metric('val_accuracy', val_acc)
-      mlflow.end_run()
+      
+    # Early stopping
+    if val_loss < best_val_loss:
+      best_val_loss = val_loss
+      patience_counter = 0
+    else:
+      patience_counter += 1
+      if patience_counter >= patience:
+        print("Early stopping triggered")
+        break
+
+  if local_rank == 0 and mlflow_run_id:
+    mlflow.end_run()
  
   print("Training finished.")
   return model
@@ -556,7 +565,7 @@ model = distributor.run(
     # test_dataset=test_dataset,
     batch_size=512,
     epochs=num_epochs,
-    mlflow_run_id=run_id
+    mlflow_run_id=run_id,
 )
 
 sn_mgpu_elapsed = timer.stop()
@@ -600,6 +609,17 @@ print(f"True class: {tiny_imagenet['train'][0]['label']}")
 
 # COMMAND ----------
 
+# import mlflow
+
+# # Create an MLflow run and get the run_id
+# try: 
+#   with mlflow.start_run() as run:
+#     run_id = run.info.run_id
+# except Exception as e:
+#   print(f"Error: {e}") 
+
+# COMMAND ----------
+
 single_node_multi_gpu__extra_epochs_dir = create_log_dir()
 print("Data is located at: ", single_node_multi_gpu__extra_epochs_dir)
 
@@ -622,7 +642,8 @@ longer_model = distributor.run(
     # test_dataset=test_dataset,
     batch_size=512,
     epochs=num_epochs,
-    mlflow_run_id=run_id
+    mlflow_run_id=run_id, 
+    patience = 3,
 )
 
 longer_train_elapsed = timer.stop()
@@ -667,7 +688,7 @@ print(f"True class: {test_dataset.labels[0]}")
 # COMMAND ----------
 
 print(f"Initial 1 Epoch Elapsed time: {sn_mgpu_elapsed:.2f} seconds")
-print(f"Initial 150 Epoch Elapsed time: {longer_train_elapsed:.2f} seconds")
+print(f"Initial 100 Epoch Elapsed time: {longer_train_elapsed:.2f} seconds")
 
 # COMMAND ----------
 
