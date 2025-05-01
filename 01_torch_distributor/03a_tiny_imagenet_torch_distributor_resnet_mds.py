@@ -499,14 +499,14 @@ def train_func(
       mlflow.log_metric('val_accuracy', val_acc)
       
     # Early stopping
-    if val_loss < best_val_loss:
-      best_val_loss = val_loss
-      patience_counter = 0
-    else:
-      patience_counter += 1
-      if patience_counter >= patience:
-        print("Early stopping triggered")
-        break
+    # if val_loss < best_val_loss:
+    #   best_val_loss = val_loss
+    #   patience_counter = 0
+    # else:
+    #   patience_counter += 1
+    #   if patience_counter >= patience:
+    #     print("Early stopping triggered")
+    #     break
 
   if local_rank == 0 and mlflow_run_id:
     mlflow.end_run()
@@ -657,7 +657,10 @@ print(f"Elapsed time: {longer_train_elapsed / 60:.2f} minutes")
 
 # COMMAND ----------
 
-test_dataset.images[0]
+index = 0 
+
+test_image = tiny_imagenet['valid'][index]['image']
+label = tiny_imagenet['valid'][index]['label']
 
 # COMMAND ----------
 
@@ -665,7 +668,7 @@ import torch
 from torchvision import transforms
 
 # Convert the image to a tensor
-image_tensor = transforms.ToTensor()(test_dataset.images[0])
+image_tensor = transforms.ToTensor()(test_image)
 
 # Move the tensor to the GPU
 image_tensor = image_tensor.to(device)
@@ -677,8 +680,31 @@ logits = longer_model(image_tensor.unsqueeze(0))
 
 _, predicted = torch.max(logits, 1)
 
-print(f"Predicted class: {predicted[0]}")
-print(f"True class: {test_dataset.labels[0]}")
+print(f"Predicted class: {predicted[index]}")
+print(f"True class: {label}")
+
+# COMMAND ----------
+
+def predict_image(model, dataset, index):
+  test_image = dataset['valid'][index]['image']
+  label = dataset['valid'][index]['label']
+
+  # Convert the image to a tensor
+  image_tensor = transforms.ToTensor()(test_image)
+
+  # Move the tensor to the GPU
+  image_tensor = image_tensor.to(device)
+  # Apply unsqueeze and pass to the model
+  logits = longer_model(image_tensor.unsqueeze(0))
+
+  _, predicted = torch.max(logits, 1)
+
+  print(f"Predicted class: {predicted[0]}")
+  print(f"True class: {label}")
+
+
+for index in range(1, 5):
+  predict_image(model, tiny_imagenet, index)
 
 # COMMAND ----------
 
@@ -687,8 +713,8 @@ print(f"True class: {test_dataset.labels[0]}")
 
 # COMMAND ----------
 
-print(f"Initial 1 Epoch Elapsed time: {sn_mgpu_elapsed:.2f} seconds")
-print(f"Initial 100 Epoch Elapsed time: {longer_train_elapsed:.2f} seconds")
+print(f"Initial 1 Epoch Elapsed time: {sn_mgpu_elapsed:.2f} seconds ({sn_mgpu_elapsed / 60:.2f} minutes)")
+print(f"Initial 100 Epoch Elapsed time: {longer_train_elapsed:.2f} seconds ({longer_train_elapsed / 60:.2f} minutes)")
 
 # COMMAND ----------
 
@@ -698,7 +724,3 @@ print(f"Initial 100 Epoch Elapsed time: {longer_train_elapsed:.2f} seconds")
 # COMMAND ----------
 
 # MAGIC %restart_python
-
-# COMMAND ----------
-
-
