@@ -9,8 +9,6 @@
 # COMMAND ----------
 
 import os
-
-
 os.environ['HF_DATASETS_CACHE'] = cifar_cache
 
 # COMMAND ----------
@@ -104,6 +102,10 @@ test_dataset = CIFARDataset(cifar_dataset['test'], transform=ds_transforms)
 
 # COMMAND ----------
 
+num_classes = len(set(train_dataset.targets))
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # Training
 
@@ -139,7 +141,7 @@ import torchvision.models as models
 from torchvision.models import ResNet18_Weights
 
 class ResNet18(nn.Module):
-    def __init__(self, num_classes=200):  # num_classes for imagenet 1k is 1000
+    def __init__(self, num_classes=num_classes):
         super(ResNet18, self).__init__()
         
         # Load the pre-trained ResNet-50 model from torchvision
