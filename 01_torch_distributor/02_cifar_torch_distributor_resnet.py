@@ -102,7 +102,7 @@ test_dataset = CIFARDataset(cifar_dataset['test'], transform=ds_transforms)
 
 # COMMAND ----------
 
-num_classes = len(set(train_dataset.targets))
+num_classes = len(set(train_dataset.labels))
 
 # COMMAND ----------
 
@@ -128,8 +128,6 @@ PYTORCH_DIR = '/dbfs/ml/pytorch'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-batch_size = 64
-num_epochs = 5 # for testing
 momentum = 0.5
 log_interval = 100
 learning_rate = 1e-4
@@ -170,9 +168,8 @@ def train_func(
   test_dataset,
   batch_size: int = 32, 
   epochs: int = 5,
-  mlflow_parent_run = None
+  mlflow_run_id=None
 ):
-
   import torch 
   import torch.optim as optim
   from torchvision import datasets, transforms
@@ -182,44 +179,47 @@ def train_func(
   from torchvision import transforms
   from torch.utils.data import DataLoader
   from PIL import Image
+  import mlflow
 
   os.environ['MLFLOW_TRACKING_URI'] = 'databricks'
   os.environ['MLFLOW_EXPERIMENT_NAME'] = experiment_path
   os.environ['MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING'] = 'true'
-  #os.environ['HF_MLFLOW_LOG_ARTIFACTS'] = 'True'
   
   os.environ['DATABRICKS_HOST'] = db_host
   os.environ['DATABRICKS_TOKEN'] = db_token
 
   device = torch.device('cuda')
 
-  train_parameters = {'batch_size': batch_size, 'epochs': num_epochs}
-  mlflow.log_params(train_parameters)
+  local_rank = int(os.environ["LOCAL_RANK"])
+  world_size = int(os.environ["WORLD_SIZE"])
+  # Use if distributed, using single node currently
+  # global_rank = torch.distributed.get_rank()
 
   model = ResNet18(test_dataset.num_classes).to(device)
 
   train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
-  learning_rate = 1e-5
+  learning_rate = 1e-3
   betas = (0.9, 0.999)
   epsilon = 1e-08
   lr_scheduler_warmup_ratio = 0.1
 
+  train_parameters = {'batch_size': batch_size, 'epochs': epochs, 'learning_rate': learning_rate}
+
+  # Only log from rank 0
+  if local_rank == 0 and mlflow_run_id:
+    mlflow.log_params(train_parameters)
+
   optimizer = optim.Adam(model.parameters(), lr=learning_rate, betas=betas, eps=epsilon, weight_decay=0)
 
   model.train()
-  running_loss = 0.0
-  correct = 0
-  total = 0
-
-  local_rank = int(os.environ["LOCAL_RANK"])
-  # Use if distributed, using single node currently
-  # global_rank = torch.distributed.get_rank()
-  world_size = int(os.environ["WORLD_SIZE"])
 
   print(f"RANK: {local_rank}")
   
   for epoch in range(1, epochs + 1):
+    running_loss = 0.0
+    correct = 0
+    total = 0
  
     # Loss function and optimizer
     loss_func = nn.CrossEntropyLoss()
@@ -241,19 +241,30 @@ def train_func(
       # Backward pass and optimization
       loss.backward()
       optimizer.step()
-
+      
       # Statistics
       running_loss += loss.item()
       _, predicted = torch.max(outputs, 1)
       total += labels.size(0)
       correct += (predicted == labels).sum().item()
 
+    epoch_loss = running_loss / len(train_dataloader)
+    epoch_acc = correct / total
+    
     if local_rank == 0:
-      print(f"Epoch [{epoch}/{epochs}], Loss: {running_loss:.4f}, Accuracy: {correct / total}")
+      print(f"Epoch [{epoch}/{epochs}], Loss: {epoch_loss:.4f}, Accuracy: {epoch_acc:.4f}")
+      
+      # Log metrics for each epoch from rank 0
+      if mlflow_run_id:
+        mlflow.log_metric('train_loss', epoch_loss, step=epoch)
+        mlflow.log_metric('train_accuracy', epoch_acc, step=epoch)
 
+  # Evaluation and model logging from rank 0 only
   if local_rank == 0:
     print(f"Finished training, logging model from RANK {local_rank}")
-    mlflow.pytorch.log_model(model, "cifar_torch_distributor_resnet")
+    
+    if mlflow_run_id:
+      mlflow.pytorch.log_model(model, "cifar_torch_distributor_resnet")
     
     model.eval()
     loss_func = nn.CrossEntropyLoss()
@@ -263,36 +274,34 @@ def train_func(
     val_loss = 0.0
     val_correct = 0
     val_total = 0
+ 
+    with torch.no_grad():
+      for batch_idx, (inputs, labels) in enumerate(test_dataloader):
+        if (batch_idx % 10 == 0):
+          print(f"[VALIDATING] [RANK {local_rank}] Running validation on samples: {batch_idx} of {len(test_dataloader)}")
 
-    for batch_idx, (inputs, labels) in enumerate(test_dataloader):
+        inputs, labels = inputs.to(device), labels.to(device)
+        output = model(inputs)
+        loss = loss_func(output, labels)
 
-      if ((local_rank == 0) and ((batch_idx) % 10 == 0)):
-        print(f"[VALIDATING] [RANK {local_rank}] Running validation on samples: {batch_idx} of {len(test_dataloader)}")
+        val_loss += loss.item()
+        _, predicted = torch.max(output, 1)
+        val_total += labels.size(0)
+        val_correct += (predicted == labels).sum().item()
 
-      device = torch.device('cuda')
-      inputs, labels = inputs.to(device), labels.to(device)
-      output = model(inputs)
-      loss = loss_func(output, labels)
+    val_loss /= len(test_dataloader)
+    val_acc = val_correct / val_total
 
-      val_loss += loss.item()
-      _, predicted = torch.max(output, 1)
-      val_total += labels.size(0)
-      val_correct += (predicted == labels).sum().item()
-
-      val_loss /= len(test_dataloader)
-      val_acc = val_correct / val_total
-
-    val_loss /= len(test_dataloader.dataset)
+    print(f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}")
     
-    if local_rank == 0:
-
-      print(f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}")
-      print("Average test loss: {}".format(val_loss))
-
+    # Log validation metrics from rank 0
+    if mlflow_run_id:
       mlflow.log_metric('val_loss', val_loss)
+      mlflow.log_metric('val_accuracy', val_acc)
+      mlflow.end_run()
  
   print("Training finished.")
-  return model 
+  return model
 
 # COMMAND ----------
 
@@ -308,6 +317,14 @@ def train_func(
 
 # COMMAND ----------
 
+import mlflow
+
+# Create an MLflow run and get the run_id
+with mlflow.start_run() as run:
+    run_id = run.info.run_id
+
+# COMMAND ----------
+
 single_node_multi_gpu_dir = create_log_dir()
 print("Data is located at: ", single_node_multi_gpu_dir)
 
@@ -319,7 +336,21 @@ num_gpus = torch.cuda.device_count()
 # TODO Update epochs as needed
 num_epochs = 1
 
-output = TorchDistributor(num_processes=num_gpus, local_mode=True, use_gpu=True).run(train_func, epochs=num_epochs, batch_size = 1024, train_dataset = train_dataset, test_dataset = test_dataset)
+# TODO Update processes for number of GPUs
+distributor = TorchDistributor(
+    num_processes=4,
+    local_mode=True,
+    use_gpu=True
+)
+
+model = distributor.run(
+    train_func,
+    train_dataset=train_dataset,
+    test_dataset=test_dataset,
+    batch_size=256,
+    epochs=num_epochs,
+    mlflow_run_id=run_id
+)
 
 sn_mgpu_elapsed = timer.stop()
 print(f"Elapsed time: {sn_mgpu_elapsed} seconds")
@@ -348,12 +379,90 @@ image_tensor = image_tensor.to(device)
 # COMMAND ----------
 
 # Apply unsqueeze and pass to the model
-logits = output(image_tensor.unsqueeze(0))
+logits = model(image_tensor.unsqueeze(0))
 
 _, predicted = torch.max(logits, 1)
 
 print(f"Predicted class: {predicted[0]}")
 print(f"True class: {test_dataset.labels[0]}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Additional Epochs
+
+# COMMAND ----------
+
+single_node_multi_gpu_longer_dir = create_log_dir()
+print("Data is located at: ", single_node_multi_gpu_longer_dir)
+
+from pyspark.ml.torch.distributor import TorchDistributor
+
+timer = hf_util.Timer()
+
+num_gpus = torch.cuda.device_count()
+# TODO Update epochs as needed
+num_epochs = 100
+
+# TODO Update processes for number of GPUs
+distributor = TorchDistributor(
+    num_processes=4,
+    local_mode=True,
+    use_gpu=True
+)
+
+longer_model = distributor.run(
+    train_func,
+    train_dataset=train_dataset,
+    test_dataset=test_dataset,
+    batch_size=256,
+    epochs=num_epochs,
+    mlflow_run_id=run_id
+)
+
+sn_mgpu_longer_elapsed = timer.stop()
+print(f"Elapsed time: {sn_mgpu_longer_elapsed} seconds")
+print(f"Elapsed time: {sn_mgpu_longer_elapsed / 60} minutes")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Inference
+
+# COMMAND ----------
+
+test_dataset.images[0]
+
+# COMMAND ----------
+
+import torch
+from torchvision import transforms
+
+# Convert the image to a tensor
+image_tensor = transforms.ToTensor()(test_dataset.images[0])
+
+# Move the tensor to the GPU
+image_tensor = image_tensor.to(device)
+
+# COMMAND ----------
+
+# Apply unsqueeze and pass to the model
+logits = longer_model(image_tensor.unsqueeze(0))
+
+_, predicted = torch.max(logits, 1)
+
+print(f"Predicted class: {predicted[0]}")
+print(f"True class: {test_dataset.labels[0]}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Timing
+
+# COMMAND ----------
+
+print(f"Initial 1 Epoch Elapsed time: {sn_mgpu_elapsed:.2f} seconds")
+print(f"Initial 100 Epoch Elapsed time: {sn_mgpu_longer_elapsed:.2f} seconds")
 
 # COMMAND ----------
 
